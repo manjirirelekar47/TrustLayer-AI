@@ -96,3 +96,32 @@ def test_invalid_settings_fail_at_startup(override):
 def test_settings_read_environment_variables(monkeypatch):
     monkeypatch.setenv("SUPPORTED_THRESHOLD", "0.8")
     assert Settings(_env_file=None).supported_threshold == 0.8
+
+
+TWO_CHUNKS = [chunk("c1", "The plan costs ten dollars."), chunk("c2", "The plan is free of charge.")]
+
+
+def test_agreement_is_null_unless_regenerate(run_check):
+    nli = {"The plan costs ten dollars.": scores(entailment=0.9), "The plan is free of charge.": scores(entailment=0.8)}
+    assert run_check(TWO_CHUNKS, nli).self_consistency_agreement is None
+
+
+def test_agreement_is_full_when_all_chunks_support(run_check):
+    nli = {"The plan costs ten dollars.": scores(entailment=0.9), "The plan is free of charge.": scores(entailment=0.8)}
+    assert run_check(TWO_CHUNKS, nli, regenerate=True).self_consistency_agreement == 1.0
+
+
+def test_agreement_reflects_split_evidence(run_check):
+    nli = {"The plan costs ten dollars.": scores(entailment=0.9), "The plan is free of charge.": scores(contradiction=0.6)}
+    result = run_check(TWO_CHUNKS, nli, regenerate=True)
+    assert result.claims[0].verdict == ClaimVerdict.SUPPORTED
+    assert result.self_consistency_agreement == 0.5
+
+
+def test_agreement_ignores_chunks_without_a_stance(run_check):
+    nli = {"The plan costs ten dollars.": scores(entailment=0.9), "The plan is free of charge.": scores(entailment=0.1)}
+    assert run_check(TWO_CHUNKS, nli, regenerate=True).self_consistency_agreement is None
+
+
+def test_agreement_is_null_without_evidence(run_check):
+    assert run_check([], {}, regenerate=True).self_consistency_agreement is None

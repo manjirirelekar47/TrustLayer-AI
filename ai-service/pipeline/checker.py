@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from typing import List
 from schemas import (
     ClaimVerdict,
@@ -32,7 +33,7 @@ def check_hallucinations(
     1. Splits answer into individual claims.
     2. Retrieves top-k chunks from ChromaDB.
     3. Runs NLI against retrieved chunks.
-    4. Evaluates self-consistency if regenerate is on.
+    4. If regenerate is on, measures how consistently the retrieved chunks agree with each verdict.
     5. Returns verdicts, confidence, evidence, and 0-100 score.
     """
     claims = split_into_claims(answer)
@@ -43,6 +44,7 @@ def check_hallucinations(
     supported_count = 0
     contradicted_count = 0
     unverifiable_count = 0
+    agreements: List[float] = []
 
     for claim in claims:
         # Retrieve top 4 relevant chunks from workspace knowledge base
@@ -104,11 +106,14 @@ def check_hallucinations(
             continue
 
         batch_nli = nli_model.predict_batch(candidate_pairs)
+        chunk_best = defaultdict(lambda: [0.0, 0.0])  # chunk_id -> [best entailment, best contradiction]
 
         for (s, chunk_id), scores in zip(candidate_meta, batch_nli):
             entail = scores["entailment"]
             contra = scores["contradiction"]
             neut = scores["neutral"]
+            chunk_best[chunk_id][0] = max(chunk_best[chunk_id][0], entail)
+            chunk_best[chunk_id][1] = max(chunk_best[chunk_id][1], contra)
 
             if entail > best_entailment:
                 best_entailment = entail
@@ -135,6 +140,12 @@ def check_hallucinations(
             confidence = max(best_neutral, 0.60)
             best_evidence_sentence = None
             unverifiable_count += 1
+
+        if regenerate:
+            # Share of chunks taking a stance (supporting or contradicting) that match the final verdict
+            stances = [v for v in (_verdict(e, c) for e, c in chunk_best.values()) if v != ClaimVerdict.UNVERIFIABLE]
+            if len(stances) >= 2:
+                agreements.append(stances.count(verdict) / len(stances))
 
         claim_results.append(
             ClaimResult(
@@ -172,11 +183,8 @@ def check_hallucinations(
         else:
             overall_verdict = ClaimVerdict.UNVERIFIABLE
 
-    # Self-consistency computation if requested
-    self_consistency_agreement = None
-    if regenerate:
-        # Measure agreement across claim stability
-        self_consistency_agreement = round(min(1.0, max(0.2, (supported_count + 0.5 * unverifiable_count) / max(total_claims, 1))), 2)
+    # Null unless regenerate is on and at least one claim has two or more chunks taking a stance
+    self_consistency_agreement = round(sum(agreements) / len(agreements), 2) if agreements else None
 
     return CheckResultData(
         workspace_id=workspace_id,
